@@ -3,7 +3,7 @@ CHIMERA Live Data Recorder — Configuration
 ============================================
 Centralised configuration for the recorder.
 All settings are environment-driven with sensible defaults.
-Runtime settings can be updated via the API and persisted to disk.
+Runtime settings can be updated via the API and persisted to disk and GCS.
 """
 
 import os
@@ -65,6 +65,50 @@ class RecorderConfig:
     )
 
 
+# ── GCS config persistence helpers ──
+
+def _gcs_config_path(base_path: str) -> str:
+    """Build the GCS object path for the runtime config."""
+    return f"{base_path.strip('/')}/config/runtime_config.json"
+
+
+def _save_config_to_gcs(config_dict: dict, bucket_name: str, base_path: str):
+    """Persist config dict to GCS. Best-effort, logs errors."""
+    if not bucket_name:
+        return
+    try:
+        from gcs_writer import _get_bucket
+        object_path = _gcs_config_path(base_path)
+        content = json.dumps(config_dict, indent=2).encode("utf-8")
+        bucket = _get_bucket(bucket_name)
+        blob = bucket.blob(object_path)
+        blob.upload_from_string(content, content_type="application/json")
+        logger.info(f"Config saved to GCS: gs://{bucket_name}/{object_path}")
+    except Exception as e:
+        logger.warning(f"Failed to save config to GCS: {e}")
+
+
+def _load_config_from_gcs(bucket_name: str, base_path: str) -> Optional[dict]:
+    """Load config dict from GCS. Returns None on any failure."""
+    if not bucket_name:
+        return None
+    try:
+        from gcs_writer import _get_bucket
+        object_path = _gcs_config_path(base_path)
+        bucket = _get_bucket(bucket_name)
+        blob = bucket.blob(object_path)
+        if not blob.exists():
+            logger.info("No config found in GCS (first run?)")
+            return None
+        content = blob.download_as_text()
+        data = json.loads(content)
+        logger.info(f"Config loaded from GCS: gs://{bucket_name}/{object_path}")
+        return data
+    except Exception as e:
+        logger.warning(f"Failed to load config from GCS: {e}")
+        return None
+
+
 @dataclass
 class AppConfig:
     """Top-level application configuration."""
@@ -84,16 +128,22 @@ class AppConfig:
         return d
 
     def save(self):
-        """Persist runtime config to disk."""
+        """Persist runtime config to /tmp (fast cache) and GCS (durable)."""
+        config_dict = self.to_dict()
+
+        # Local cache (fast, survives warm restarts)
         try:
-            RUNTIME_CONFIG_FILE.write_text(json.dumps(self.to_dict(), indent=2))
-            logger.info("Runtime config saved")
+            RUNTIME_CONFIG_FILE.write_text(json.dumps(config_dict, indent=2))
+            logger.info("Runtime config saved to /tmp")
         except Exception as e:
-            logger.warning(f"Failed to save runtime config: {e}")
+            logger.warning(f"Failed to save runtime config to /tmp: {e}")
+
+        # GCS (durable, survives cold starts and redeployments)
+        _save_config_to_gcs(config_dict, self.gcs.bucket_name, self.gcs.base_path)
 
     @classmethod
     def load(cls) -> "AppConfig":
-        """Load config from environment variables, then overlay runtime file."""
+        """Load config from env vars, then overlay from GCS (or /tmp fallback)."""
         config = cls()
 
         # ── Load from environment variables first ──
@@ -108,14 +158,22 @@ class AppConfig:
         interval = os.environ.get("POLL_INTERVAL", "60")
         config.recorder.poll_interval_seconds = int(interval)
 
-        # ── Overlay runtime config file if it exists ──
-        try:
-            if RUNTIME_CONFIG_FILE.exists():
-                data = json.loads(RUNTIME_CONFIG_FILE.read_text())
-                _merge_config(config, data)
-                logger.info("Runtime config loaded from disk")
-        except Exception as e:
-            logger.warning(f"Failed to load runtime config: {e}")
+        # ── Overlay from GCS (durable source of truth) ──
+        gcs_data = _load_config_from_gcs(
+            config.gcs.bucket_name, config.gcs.base_path
+        )
+        if gcs_data:
+            _merge_config(config, gcs_data)
+            logger.info("Runtime config overlaid from GCS")
+        else:
+            # ── Fallback: overlay from /tmp (warm-instance cache) ──
+            try:
+                if RUNTIME_CONFIG_FILE.exists():
+                    data = json.loads(RUNTIME_CONFIG_FILE.read_text())
+                    _merge_config(config, data)
+                    logger.info("Runtime config loaded from /tmp (GCS unavailable)")
+            except Exception as e:
+                logger.warning(f"Failed to load runtime config from /tmp: {e}")
 
         return config
 
