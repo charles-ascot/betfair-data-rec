@@ -1,666 +1,513 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 
-// ── API base URL ──
 const API = import.meta.env.VITE_API_URL || ''
 
+// ═══════════════════════════════════════════
+//  API HELPERS
+// ═══════════════════════════════════════════
+
 async function api(path, opts = {}) {
-  const res = await fetch(`${API}${path}`, {
+  const url = `${API}${path}`
+  const res = await fetch(url, {
     headers: { 'Content-Type': 'application/json' },
     ...opts,
   })
-  const data = await res.json()
-  if (!res.ok) throw new Error(data.message || `HTTP ${res.status}`)
-  return data
-}
-
-// ── LocalStorage persistence ──
-const STORAGE_KEY = 'datapulse_settings'
-
-function loadSettings() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY)
-    return raw ? JSON.parse(raw) : {}
-  } catch { return {} }
-}
-
-function saveSettings(updates) {
-  try {
-    const current = loadSettings()
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...current, ...updates }))
-  } catch {}
-}
-
-// ── Helpers ──
-function formatBytes(bytes) {
-  if (!bytes) return '0 B'
-  const units = ['B', 'KB', 'MB', 'GB']
-  let i = 0
-  let b = bytes
-  while (b >= 1024 && i < units.length - 1) { b /= 1024; i++ }
-  return `${b.toFixed(1)} ${units[i]}`
-}
-
-function timeAgo(iso) {
-  if (!iso) return '—'
-  const diff = (Date.now() - new Date(iso).getTime()) / 1000
-  if (diff < 60) return `${Math.floor(diff)}s ago`
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`
-  return `${Math.floor(diff / 3600)}h ago`
-}
-
-function formatTime(iso) {
-  if (!iso) return '—'
-  try {
-    return new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
-  } catch { return '—' }
-}
-
-// ═══════════════════════════════════════════════
-//  LOGIN SCREEN
-// ═══════════════════════════════════════════════
-function LoginScreen({ onLogin, error, loading }) {
-  const saved = loadSettings()
-  const [mode, setMode] = useState(saved.loginMode || 'ssoid')
-  const [ssoid, setSsoid] = useState(saved.ssoid || '')
-  const [username, setUsername] = useState(saved.username || '')
-  const [password, setPassword] = useState('')
-  const [appKey, setAppKey] = useState(saved.appKey || '')
-
-  // Persist as user types
-  useEffect(() => { saveSettings({ appKey, loginMode: mode, username, ssoid }) }, [appKey, mode, username, ssoid])
-
-  const handleSubmit = (e) => {
-    e.preventDefault()
-    if (!appKey.trim()) return
-    if (mode === 'ssoid') {
-      onLogin({ mode: 'ssoid', ssoid: ssoid.trim(), appKey: appKey.trim() })
-    } else {
-      onLogin({ mode: 'credentials', username: username.trim(), password, appKey: appKey.trim() })
-    }
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }))
+    throw new Error(err.detail || err.message || res.statusText)
   }
+  return res.json()
+}
 
+const post = (path, body) => api(path, { method: 'POST', body: JSON.stringify(body) })
+
+// ═══════════════════════════════════════════
+//  STATUS HELPERS
+// ═══════════════════════════════════════════
+
+const STATUS_COLORS = {
+  RUNNING: '#00D4FF',
+  POLLING: '#00D4FF',
+  WRITING: '#9D4EDD',
+  STOPPED: '#6b7280',
+  STARTING: '#f59e0b',
+  AUTH_ERROR: '#ef4444',
+}
+
+function StatusBadge({ status }) {
+  const color = STATUS_COLORS[status] || '#6b7280'
   return (
-    <div className="login-screen">
-      <div className="login-overlay" />
-      <form className="glass-panel login-panel" onSubmit={handleSubmit}>
-        <div className="logo-section">
-          <div className="app-title">CHIMERA DataPulse</div>
-          <div className="app-subtitle">LIVE MARKET DATA RECORDER</div>
-        </div>
+    <span className="status-badge" style={{ '--badge-color': color }}>
+      <span className="status-dot" />
+      {status}
+    </span>
+  )
+}
 
-        <div className="separator" />
-
-        {error && <div className="error-message">{error}</div>}
-
-        <div className="form-group">
-          <label className="form-label">Betfair Application Key</label>
-          <input
-            className="form-input"
-            type="text"
-            value={appKey}
-            onChange={e => setAppKey(e.target.value)}
-            placeholder="Enter app key"
-            autoComplete="off"
-          />
-        </div>
-
-        <div className="auth-toggle">
-          <button
-            type="button"
-            className={`toggle-btn ${mode === 'ssoid' ? 'active' : ''}`}
-            onClick={() => setMode('ssoid')}
-          >SSOID</button>
-          <button
-            type="button"
-            className={`toggle-btn ${mode === 'credentials' ? 'active' : ''}`}
-            onClick={() => setMode('credentials')}
-          >Username / Password</button>
-        </div>
-
-        {mode === 'ssoid' ? (
-          <div className="form-group">
-            <label className="form-label">Session Token (SSOID)</label>
-            <input
-              className="form-input"
-              type="text"
-              value={ssoid}
-              onChange={e => setSsoid(e.target.value)}
-              placeholder="Paste your SSOID"
-              autoComplete="off"
-            />
-          </div>
-        ) : (
-          <>
-            <div className="form-group">
-              <label className="form-label">Username</label>
-              <input
-                className="form-input"
-                type="text"
-                value={username}
-                onChange={e => setUsername(e.target.value)}
-                placeholder="Betfair username"
-                autoComplete="username"
-              />
-            </div>
-            <div className="form-group">
-              <label className="form-label">Password</label>
-              <input
-                className="form-input"
-                type="password"
-                value={password}
-                onChange={e => setPassword(e.target.value)}
-                placeholder="Betfair password"
-                autoComplete="current-password"
-              />
-            </div>
-          </>
-        )}
-
-        <button className="button-primary" type="submit" disabled={loading || !appKey.trim()}>
-          {loading ? 'Authenticating...' : 'Connect to Betfair'}
-        </button>
-
-        <div className="copyright">CHIMERA Platform · Ascot Wealth Management</div>
-      </form>
+function StatCard({ label, value, sub }) {
+  return (
+    <div className="stat-card">
+      <div className="stat-value">{value ?? '—'}</div>
+      <div className="stat-label">{label}</div>
+      {sub && <div className="stat-sub">{sub}</div>}
     </div>
   )
 }
 
-// ═══════════════════════════════════════════════
-//  CONFIGURATION PANEL
-// ═══════════════════════════════════════════════
-function ConfigPanel({ config, onSave, onTestGcs, gcsTestResult, saving }) {
-  const saved = loadSettings()
-  const [gcsProject, setGcsProject] = useState(saved.gcsProject || config.gcs_project || '')
-  const [gcsBucket, setGcsBucket] = useState(saved.gcsBucket || config.gcs_bucket || '')
-  const [gcsCreds, setGcsCreds] = useState(saved.gcsCreds || '')
-  const [pollInterval, setPollInterval] = useState(saved.pollInterval || config.poll_interval || 60)
+// ═══════════════════════════════════════════
+//  SETTINGS PANEL
+// ═══════════════════════════════════════════
 
-  // Sync from server config only if local is empty
+function SettingsPanel({ config, onSave, onValidateSession, onTestGCS }) {
+  const [form, setForm] = useState({
+    betfair_app_key: '',
+    betfair_ssoid: '',
+    gcs_project_id: '',
+    gcs_bucket_name: '',
+    gcs_base_path: 'betfair-live',
+    poll_interval_seconds: 60,
+    countries: 'GB,IE',
+    price_projection: 'EX_BEST_OFFERS,EX_TRADED',
+  })
+  const [saving, setSaving] = useState(false)
+  const [validating, setValidating] = useState(false)
+  const [testingGCS, setTestingGCS] = useState(false)
+  const [message, setMessage] = useState(null)
+
   useEffect(() => {
-    if (!gcsProject && config.gcs_project) setGcsProject(config.gcs_project)
-    if (!gcsBucket && config.gcs_bucket) setGcsBucket(config.gcs_bucket)
-    if (pollInterval === 60 && config.poll_interval && config.poll_interval !== 60) setPollInterval(config.poll_interval)
+    if (config) {
+      setForm({
+        betfair_app_key: config.betfair?.app_key || '',
+        betfair_ssoid: '',
+        gcs_project_id: config.gcs?.project_id || '',
+        gcs_bucket_name: config.gcs?.bucket_name || '',
+        gcs_base_path: config.gcs?.base_path || 'betfair-live',
+        poll_interval_seconds: config.recorder?.poll_interval_seconds || 60,
+        countries: (config.recorder?.countries || ['GB', 'IE']).join(','),
+        price_projection: (config.recorder?.price_projection || ['EX_BEST_OFFERS', 'EX_TRADED']).join(','),
+      })
+    }
   }, [config])
 
-  // Persist as user types
-  useEffect(() => {
-    saveSettings({ gcsProject, gcsBucket, gcsCreds, pollInterval })
-  }, [gcsProject, gcsBucket, gcsCreds, pollInterval])
+  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }))
 
-  const handleSave = () => {
-    onSave({
-      gcs_project: gcsProject,
-      gcs_bucket: gcsBucket,
-      gcs_credentials: gcsCreds || undefined,
-      poll_interval: pollInterval,
-    })
+  const handleSave = async () => {
+    setSaving(true)
+    setMessage(null)
+    try {
+      const payload = {}
+      if (form.betfair_app_key) payload.betfair_app_key = form.betfair_app_key
+      if (form.betfair_ssoid) payload.betfair_ssoid = form.betfair_ssoid
+      if (form.gcs_project_id) payload.gcs_project_id = form.gcs_project_id
+      if (form.gcs_bucket_name) payload.gcs_bucket_name = form.gcs_bucket_name
+      if (form.gcs_base_path) payload.gcs_base_path = form.gcs_base_path
+      payload.poll_interval_seconds = parseInt(form.poll_interval_seconds) || 60
+      payload.countries = form.countries.split(',').map((c) => c.trim()).filter(Boolean)
+      payload.price_projection = form.price_projection.split(',').map((p) => p.trim()).filter(Boolean)
+      await onSave(payload)
+      setMessage({ type: 'success', text: 'Configuration saved' })
+    } catch (e) {
+      setMessage({ type: 'error', text: e.message })
+    }
+    setSaving(false)
+  }
+
+  const handleValidate = async () => {
+    setValidating(true)
+    setMessage(null)
+    try {
+      const res = await onValidateSession(form.betfair_ssoid, form.betfair_app_key)
+      setMessage({
+        type: res.valid ? 'success' : 'error',
+        text: res.valid ? `Session valid` : `Session invalid: ${res.message}`,
+      })
+    } catch (e) {
+      setMessage({ type: 'error', text: e.message })
+    }
+    setValidating(false)
+  }
+
+  const handleTestGCS = async () => {
+    setTestingGCS(true)
+    setMessage(null)
+    try {
+      const res = await onTestGCS()
+      setMessage({
+        type: res.success ? 'success' : 'error',
+        text: res.message,
+      })
+    } catch (e) {
+      setMessage({ type: 'error', text: e.message })
+    }
+    setTestingGCS(false)
   }
 
   return (
-    <div className="glass-panel config-panel">
-      <div className="panel-title">⚙ Storage Configuration</div>
-
-      <div className="form-group">
-        <label className="form-label">GCP Project ID</label>
-        <input
-          className="form-input"
-          value={gcsProject}
-          onChange={e => setGcsProject(e.target.value)}
-          placeholder="your-gcp-project-id"
-        />
-      </div>
-
-      <div className="form-group">
-        <label className="form-label">GCS Bucket</label>
-        <input
-          className="form-input"
-          value={gcsBucket}
-          onChange={e => setGcsBucket(e.target.value)}
-          placeholder="chimera-datapulse-live"
-        />
-      </div>
-
-      <div className="form-group">
-        <label className="form-label">Service Account JSON Path</label>
-        <input
-          className="form-input"
-          value={gcsCreds}
-          onChange={e => setGcsCreds(e.target.value)}
-          placeholder="Leave blank for Cloud Run default credentials"
-        />
-      </div>
-
-      <div className="form-group">
-        <label className="form-label">Poll Interval (seconds)</label>
-        <input
-          className="form-input"
-          type="number"
-          min="10"
-          max="300"
-          value={pollInterval}
-          onChange={e => setPollInterval(parseInt(e.target.value) || 60)}
-        />
-      </div>
-
-      {gcsTestResult && (
-        <div className={`validation-result ${gcsTestResult.ok ? 'valid' : 'invalid'}`}>
-          {gcsTestResult.message}
-        </div>
+    <div className="settings-panel">
+      {message && (
+        <div className={`msg msg-${message.type}`}>{message.text}</div>
       )}
 
-      <div className="config-actions">
-        <button className="button-primary" onClick={handleSave} disabled={saving}>
-          {saving ? 'Saving...' : 'Save Configuration'}
-        </button>
-        <button className="button-check" onClick={onTestGcs} style={{ marginTop: 8 }}>
-          Test GCS Connection
-        </button>
+      <div className="settings-section">
+        <h3 className="section-title">Betfair API</h3>
+        <div className="field-group">
+          <label>App Key</label>
+          <input type="text" value={form.betfair_app_key} onChange={set('betfair_app_key')} placeholder="Your Betfair app key" />
+        </div>
+        <div className="field-group">
+          <label>SSOID (Session Token)</label>
+          <div className="input-row">
+            <input type="password" value={form.betfair_ssoid} onChange={set('betfair_ssoid')} placeholder="Paste SSOID here" />
+            <button className="btn btn-sm" onClick={handleValidate} disabled={validating || !form.betfair_ssoid}>
+              {validating ? 'Testing…' : 'Validate'}
+            </button>
+          </div>
+        </div>
       </div>
+
+      <div className="settings-section">
+        <h3 className="section-title">Google Cloud Storage</h3>
+        <div className="field-group">
+          <label>Project ID</label>
+          <input type="text" value={form.gcs_project_id} onChange={set('gcs_project_id')} placeholder="your-gcp-project" />
+        </div>
+        <div className="field-group">
+          <label>Bucket Name</label>
+          <div className="input-row">
+            <input type="text" value={form.gcs_bucket_name} onChange={set('gcs_bucket_name')} placeholder="your-bucket-name" />
+            <button className="btn btn-sm" onClick={handleTestGCS} disabled={testingGCS}>
+              {testingGCS ? 'Testing…' : 'Test'}
+            </button>
+          </div>
+        </div>
+        <div className="field-group">
+          <label>Base Path</label>
+          <input type="text" value={form.gcs_base_path} onChange={set('gcs_base_path')} placeholder="betfair-live" />
+        </div>
+      </div>
+
+      <div className="settings-section">
+        <h3 className="section-title">Recorder</h3>
+        <div className="field-row">
+          <div className="field-group">
+            <label>Poll Interval (s)</label>
+            <input type="number" min="10" max="300" value={form.poll_interval_seconds} onChange={set('poll_interval_seconds')} />
+          </div>
+          <div className="field-group">
+            <label>Countries</label>
+            <input type="text" value={form.countries} onChange={set('countries')} placeholder="GB,IE" />
+          </div>
+        </div>
+        <div className="field-group">
+          <label>Price Projection</label>
+          <input type="text" value={form.price_projection} onChange={set('price_projection')} placeholder="EX_BEST_OFFERS,EX_TRADED" />
+        </div>
+      </div>
+
+      <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
+        {saving ? 'Saving…' : 'Save Configuration'}
+      </button>
     </div>
   )
 }
 
-// ═══════════════════════════════════════════════
-//  ENGINE CONTROL PANEL
-// ═══════════════════════════════════════════════
-function EngineControl({ state, onStart, onStop }) {
-  const status = state.status || 'STOPPED'
-  const isRunning = status === 'RUNNING'
-  const isStarting = status === 'STARTING'
+// ═══════════════════════════════════════════
+//  MARKET TABLE
+// ═══════════════════════════════════════════
 
-  return (
-    <div className="glass-panel engine-panel">
-      <div className="panel-title">⚡ Recording Engine</div>
-
-      <div className="engine-status-row">
-        <div className={`status-indicator ${isRunning ? 'running' : isStarting ? 'starting' : 'stopped'}`} />
-        <span className="engine-status-text">{status}</span>
-      </div>
-
-      <div className="engine-info">
-        <div className="info-row">
-          <span className="info-label">Date</span>
-          <span className="info-value">{state.date || '—'}</span>
-        </div>
-        <div className="info-row">
-          <span className="info-label">Poll Cycle</span>
-          <span className="info-value">{state.poll_cycle || 0}</span>
-        </div>
-        <div className="info-row">
-          <span className="info-label">Last Poll</span>
-          <span className="info-value">{timeAgo(state.last_poll)}</span>
-        </div>
-        <div className="info-row">
-          <span className="info-label">Poll Duration</span>
-          <span className="info-value">{state.last_poll_duration || 0}s</span>
-        </div>
-        <div className="info-row">
-          <span className="info-label">Balance</span>
-          <span className="info-value balance">
-            {state.balance != null ? `£${state.balance.toFixed(2)}` : '—'}
-          </span>
-        </div>
-      </div>
-
-      {isRunning || isStarting ? (
-        <button className="button-abort" onClick={onStop}>Stop Recording</button>
-      ) : (
-        <button className="button-primary" onClick={onStart}>Start Recording</button>
-      )}
-    </div>
-  )
-}
-
-// ═══════════════════════════════════════════════
-//  STATS PANEL
-// ═══════════════════════════════════════════════
-function StatsPanel({ state }) {
-  const summary = state.summary || {}
-  const storage = state.storage || {}
-
-  return (
-    <div className="glass-panel stats-panel">
-      <div className="panel-title">📊 Today's Statistics</div>
-
-      <div className="stats-grid">
-        <div className="stat-card">
-          <div className="stat-card-value">{summary.total_markets_discovered || 0}</div>
-          <div className="stat-card-label">Markets Found</div>
-        </div>
-        <div className="stat-card">
-          <div className="stat-card-value cyan">{summary.active_markets || 0}</div>
-          <div className="stat-card-label">Active Now</div>
-        </div>
-        <div className="stat-card">
-          <div className="stat-card-value green">{summary.total_snapshots || 0}</div>
-          <div className="stat-card-label">Snapshots Saved</div>
-        </div>
-        <div className="stat-card">
-          <div className="stat-card-value purple">{summary.closed_markets || 0}</div>
-          <div className="stat-card-label">Markets Closed</div>
-        </div>
-      </div>
-
-      <div className="separator" />
-
-      <div className="storage-stats">
-        <div className="info-row">
-          <span className="info-label">Files Written</span>
-          <span className="info-value">{storage.files_written || 0}</span>
-        </div>
-        <div className="info-row">
-          <span className="info-label">Data Stored</span>
-          <span className="info-value">{storage.bytes_human || '0 B'}</span>
-        </div>
-        <div className="info-row">
-          <span className="info-label">Storage Errors</span>
-          <span className={`info-value ${(storage.errors || 0) > 0 ? 'error' : ''}`}>
-            {storage.errors || 0}
-          </span>
-        </div>
-        <div className="info-row">
-          <span className="info-label">API Requests</span>
-          <span className="info-value">{summary.api_requests || 0}</span>
-        </div>
-        <div className="info-row">
-          <span className="info-label">Bucket</span>
-          <span className="info-value mono">{storage.bucket || '—'}</span>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-// ═══════════════════════════════════════════════
-//  ACTIVE MARKETS TABLE
-// ═══════════════════════════════════════════════
-function MarketsTable({ markets }) {
+function MarketTable({ markets }) {
   if (!markets || markets.length === 0) {
-    return (
-      <div className="glass-panel">
-        <div className="panel-title">🏇 Active Markets</div>
-        <div className="empty-state">No active markets — engine may be stopped or no races today</div>
-      </div>
-    )
+    return <div className="empty-state">No markets loaded yet. Start recording or run a manual poll.</div>
   }
 
   return (
-    <div className="glass-panel">
-      <div className="panel-title">🏇 Active Markets ({markets.length})</div>
-      <div className="markets-table-wrap">
-        <table className="markets-table">
-          <thead>
-            <tr>
-              <th>Time</th>
-              <th>Venue</th>
-              <th>Type</th>
-              <th>Status</th>
-              <th>Runners</th>
-              <th>Matched</th>
-            </tr>
-          </thead>
-          <tbody>
-            {markets.map(m => (
-              <tr key={m.market_id} className={m.in_play ? 'in-play' : ''}>
-                <td className="mono">{formatTime(m.race_time)}</td>
-                <td>
-                  <span className="country-badge">{m.country}</span>
-                  {m.venue}
-                </td>
-                <td>{m.market_type}</td>
-                <td>
-                  <span className={`status-badge ${(m.status || '').toLowerCase()}`}>
-                    {m.in_play ? '● LIVE' : m.status}
-                  </span>
-                </td>
-                <td>{m.runners_count}</td>
-                <td className="mono">£{(m.total_matched || 0).toLocaleString()}</td>
+    <div className="table-wrap">
+      <table className="data-table">
+        <thead>
+          <tr>
+            <th>Venue</th>
+            <th>Race</th>
+            <th>Time</th>
+            <th>Mins to Off</th>
+            <th>Runners</th>
+            <th>Status</th>
+            <th>Matched</th>
+            <th>Book</th>
+          </tr>
+        </thead>
+        <tbody>
+          {markets.map((m) => {
+            const mto = m.minutesToOff
+            const timeClass = mto != null && mto <= 5 ? 'text-warn' : mto != null && mto <= 0 ? 'text-live' : ''
+            return (
+              <tr key={m.marketId}>
+                <td className="text-accent">{m.venue || '—'}</td>
+                <td>{m.marketName || m.event || '—'}</td>
+                <td className="mono">{m.marketStartTime ? new Date(m.marketStartTime).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) : '—'}</td>
+                <td className={`mono ${timeClass}`}>{mto != null ? `${mto.toFixed(0)}m` : '—'}</td>
+                <td className="mono">{m.runners ?? '—'}</td>
+                <td><StatusBadge status={m.inPlay ? 'IN_PLAY' : m.status || 'UNKNOWN'} /></td>
+                <td className="mono">{m.totalMatched ? `£${Number(m.totalMatched).toLocaleString()}` : '—'}</td>
+                <td>{m.hasBookData ? '✓' : '—'}</td>
               </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+            )
+          })}
+        </tbody>
+      </table>
     </div>
   )
 }
 
-// ═══════════════════════════════════════════════
-//  POLL LOG
-// ═══════════════════════════════════════════════
-function PollLog({ logs }) {
-  const [expanded, setExpanded] = useState(false)
-
-  if (!logs || logs.length === 0) return null
-
-  const display = expanded ? logs : logs.slice(0, 8)
-
-  return (
-    <div className="glass-panel">
-      <div className="panel-title" onClick={() => setExpanded(!expanded)} style={{ cursor: 'pointer' }}>
-        📋 Poll Log ({logs.length})
-        <span className="collapse-icon">{expanded ? '▼' : '▶'}</span>
-      </div>
-      <div className="poll-log-list">
-        {display.map((log, i) => (
-          <div key={i} className="poll-log-entry">
-            <span className="poll-cycle">#{log.cycle}</span>
-            <span className="poll-time">{formatTime(log.timestamp)}</span>
-            <span className="poll-markets">{log.markets_polled} mkts</span>
-            <span className="poll-saved green">{log.saved} saved</span>
-            {log.failed > 0 && <span className="poll-failed red">{log.failed} fail</span>}
-            <span className="poll-duration">{log.duration}s</span>
-          </div>
-        ))}
-      </div>
-      {logs.length > 8 && (
-        <button className="expand-btn" onClick={() => setExpanded(!expanded)}>
-          {expanded ? 'Show less' : `Show all ${logs.length}`}
-        </button>
-      )}
-    </div>
-  )
-}
-
-// ═══════════════════════════════════════════════
+// ═══════════════════════════════════════════
 //  ERROR LOG
-// ═══════════════════════════════════════════════
-function ErrorLog({ errors }) {
-  if (!errors || errors.length === 0) return null
+// ═══════════════════════════════════════════
 
+function ErrorLog({ errors }) {
+  if (!errors || errors.length === 0) {
+    return <div className="empty-state">No errors. Everything is running clean.</div>
+  }
   return (
-    <div className="glass-panel error-panel">
-      <div className="panel-title">⚠ Errors ({errors.length})</div>
-      <div className="error-log-list">
-        {errors.map((err, i) => (
-          <div key={i} className="error-log-entry">
-            <span className="error-time">{formatTime(err.timestamp)}</span>
-            <span className="error-msg">{err.message}</span>
-          </div>
-        ))}
-      </div>
+    <div className="error-log">
+      {errors.slice().reverse().map((e, i) => (
+        <div key={i} className="error-entry">
+          <span className="mono text-muted">{new Date(e.timestamp).toLocaleTimeString('en-GB')}</span>
+          <span>{e.message}</span>
+        </div>
+      ))}
     </div>
   )
 }
 
-// ═══════════════════════════════════════════════
+// ═══════════════════════════════════════════
 //  MAIN APP
-// ═══════════════════════════════════════════════
+// ═══════════════════════════════════════════
+
 export default function App() {
-  const [authenticated, setAuthenticated] = useState(false)
-  const [loginError, setLoginError] = useState('')
-  const [loginLoading, setLoginLoading] = useState(false)
-  const [state, setState] = useState({})
-  const [config, setConfig] = useState({})
-  const [gcsTestResult, setGcsTestResult] = useState(null)
-  const [configSaving, setConfigSaving] = useState(false)
-  const [view, setView] = useState('dashboard') // 'dashboard' or 'config'
+  const [tab, setTab] = useState('dashboard')
+  const [state, setState] = useState(null)
+  const [config, setConfig] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [actionMsg, setActionMsg] = useState(null)
   const pollRef = useRef(null)
 
-  // ── State polling ──
+  // ── Fetch state ──
   const fetchState = useCallback(async () => {
     try {
-      const data = await api('/api/state')
-      setState(data)
-      if (!data.authenticated) {
-        setAuthenticated(false)
-      }
-    } catch {
-      // Server unreachable — keep last state
+      const s = await api('/api/state')
+      setState(s)
+      setConfig(s.config)
+      setLoading(false)
+    } catch (e) {
+      console.error('State fetch failed:', e)
+      setLoading(false)
     }
   }, [])
 
   useEffect(() => {
-    if (!authenticated) return
     fetchState()
     pollRef.current = setInterval(fetchState, 5000)
     return () => clearInterval(pollRef.current)
-  }, [authenticated, fetchState])
+  }, [fetchState])
 
-  // ── Login ──
-  const handleLogin = async ({ mode, ssoid, username, password, appKey }) => {
-    setLoginLoading(true)
-    setLoginError('')
-    try {
-      // First configure the app key
-      await api('/api/config', {
-        method: 'POST',
-        body: JSON.stringify({ app_key: appKey }),
-      })
-
-      // Then authenticate
-      if (mode === 'ssoid') {
-        await api('/api/login/ssoid', {
-          method: 'POST',
-          body: JSON.stringify({ ssoid }),
-        })
-      } else {
-        await api('/api/login/credentials', {
-          method: 'POST',
-          body: JSON.stringify({ username, password }),
-        })
-      }
-
-      // Fetch initial config
-      const cfg = await api('/api/config')
-      setConfig(cfg)
-      setAuthenticated(true)
-    } catch (err) {
-      setLoginError(err.message)
-    } finally {
-      setLoginLoading(false)
-    }
-  }
-
-  // ── Logout ──
-  const handleLogout = async () => {
-    try { await api('/api/logout', { method: 'POST' }) } catch {}
-    setAuthenticated(false)
-    setState({})
-    clearInterval(pollRef.current)
-  }
-
-  // ── Engine controls ──
+  // ── Actions ──
   const handleStart = async () => {
     try {
-      await api('/api/engine/start', { method: 'POST' })
+      await post('/api/recorder/start')
+      setActionMsg({ type: 'success', text: 'Recorder started' })
       fetchState()
-    } catch (err) {
-      alert(`Start failed: ${err.message}`)
+    } catch (e) {
+      setActionMsg({ type: 'error', text: e.message })
     }
   }
 
   const handleStop = async () => {
     try {
-      await api('/api/engine/stop', { method: 'POST' })
+      await post('/api/recorder/stop')
+      setActionMsg({ type: 'success', text: 'Recorder stopped' })
       fetchState()
-    } catch (err) {
-      alert(`Stop failed: ${err.message}`)
+    } catch (e) {
+      setActionMsg({ type: 'error', text: e.message })
     }
   }
 
-  // ── Config ──
-  const handleSaveConfig = async (cfg) => {
-    setConfigSaving(true)
-    setGcsTestResult(null)
+  const handlePoll = async () => {
     try {
-      const res = await api('/api/config', {
-        method: 'POST',
-        body: JSON.stringify(cfg),
-      })
-      setConfig(res.config || cfg)
-    } catch (err) {
-      alert(`Save failed: ${err.message}`)
-    } finally {
-      setConfigSaving(false)
+      setActionMsg({ type: 'info', text: 'Running poll…' })
+      const res = await post('/api/recorder/poll')
+      setActionMsg({ type: 'success', text: res.message })
+      fetchState()
+    } catch (e) {
+      setActionMsg({ type: 'error', text: e.message })
     }
   }
 
-  const handleTestGcs = async () => {
-    setGcsTestResult(null)
-    try {
-      await api('/api/config/test-gcs', { method: 'POST' })
-      setGcsTestResult({ ok: true, message: '✓ GCS connection successful' })
-    } catch (err) {
-      setGcsTestResult({ ok: false, message: `✗ ${err.message}` })
-    }
+  const handleSaveConfig = async (payload) => {
+    const res = await post('/api/config', payload)
+    setConfig(res.config)
+    fetchState()
   }
 
-  // ── Render ──
-  if (!authenticated) {
-    return <LoginScreen onLogin={handleLogin} error={loginError} loading={loginLoading} />
+  const handleValidateSession = async (ssoid, appKey) => {
+    return await post('/api/validate-session', { ssoid, app_key: appKey || undefined })
+  }
+
+  const handleTestGCS = async () => {
+    return await post('/api/test-gcs', {})
+  }
+
+  // ── Derived ──
+  const status = state?.status || 'LOADING'
+  const isRunning = status === 'RUNNING' || status === 'POLLING' || status === 'WRITING'
+  const stats = state?.stats || {}
+  const gcs = state?.gcs || {}
+
+  if (loading && !state) {
+    return (
+      <div className="app-shell">
+        <div className="loading-screen">
+          <div className="spinner" />
+          <p>Connecting to recorder…</p>
+        </div>
+      </div>
+    )
   }
 
   return (
-    <div className="app">
-      <div className="dashboard">
-        {/* Header */}
-        <div className="header">
-          <div className="header-left">
-            <div className="header-title">CHIMERA DataPulse</div>
-            <div className="header-subtitle">LIVE MARKET DATA RECORDER</div>
-          </div>
-          <div className="header-right">
-            <div className="nav-tabs">
-              <button
-                className={`nav-tab ${view === 'dashboard' ? 'active' : ''}`}
-                onClick={() => setView('dashboard')}
-              >Dashboard</button>
-              <button
-                className={`nav-tab ${view === 'config' ? 'active' : ''}`}
-                onClick={() => setView('config')}
-              >Configuration</button>
-            </div>
-            <button className="button-logout" onClick={handleLogout}>Logout</button>
-          </div>
+    <div className="app-shell">
+      {/* ── HEADER ── */}
+      <header className="app-header">
+        <div className="header-left">
+          <h1 className="app-title">
+            <span className="title-accent">CHIMERA</span> Live Recorder
+          </h1>
+          <StatusBadge status={status} />
         </div>
+        <div className="header-right">
+          <span className="header-date mono">{state?.date || '—'}</span>
+          <span className="header-sep">|</span>
+          <span className="mono">Poll #{state?.pollCount ?? 0}</span>
+        </div>
+      </header>
 
-        {/* Content */}
-        <div className="content">
-          {view === 'config' ? (
-            <div className="config-view">
-              <ConfigPanel
-                config={config}
-                onSave={handleSaveConfig}
-                onTestGcs={handleTestGcs}
-                gcsTestResult={gcsTestResult}
-                saving={configSaving}
-              />
-            </div>
-          ) : (
-            <div className="dashboard-view">
-              <div className="dashboard-top">
-                <EngineControl state={state} onStart={handleStart} onStop={handleStop} />
-                <StatsPanel state={state} />
+      {/* ── ACTION MSG ── */}
+      {actionMsg && (
+        <div className={`msg msg-${actionMsg.type} msg-global`} onClick={() => setActionMsg(null)}>
+          {actionMsg.text}
+        </div>
+      )}
+
+      {/* ── TABS ── */}
+      <nav className="tab-bar">
+        {['dashboard', 'markets', 'settings', 'errors'].map((t) => (
+          <button key={t} className={`tab ${tab === t ? 'tab-active' : ''}`} onClick={() => setTab(t)}>
+            {t.charAt(0).toUpperCase() + t.slice(1)}
+          </button>
+        ))}
+      </nav>
+
+      {/* ── CONTENT ── */}
+      <main className="app-main">
+        {tab === 'dashboard' && (
+          <div className="dashboard">
+            {/* Controls */}
+            <div className="glass-panel controls-panel">
+              <div className="controls-row">
+                {!isRunning ? (
+                  <button className="btn btn-primary" onClick={handleStart}>▶ Start Recording</button>
+                ) : (
+                  <button className="btn btn-danger" onClick={handleStop}>■ Stop</button>
+                )}
+                <button className="btn btn-secondary" onClick={handlePoll} disabled={isRunning}>
+                  ↻ Manual Poll
+                </button>
               </div>
-
-              <MarketsTable markets={state.active_markets} />
-              <PollLog logs={state.poll_log} />
-              <ErrorLog errors={state.errors} />
+              {state?.lastPoll && (
+                <div className="last-poll mono">
+                  Last poll: {new Date(state.lastPoll).toLocaleTimeString('en-GB')} · 
+                  Interval: {state.pollInterval}s
+                </div>
+              )}
             </div>
-          )}
-        </div>
-      </div>
+
+            {/* Stats Grid */}
+            <div className="stats-grid">
+              <StatCard label="Total Polls" value={stats.total_polls} />
+              <StatCard label="Markets Cached" value={stats.markets_cached} />
+              <StatCard label="Books Cached" value={stats.books_cached} />
+              <StatCard label="GCS Writes" value={stats.total_gcs_writes} />
+              <StatCard label="GCS Errors" value={stats.gcs_errors} />
+              <StatCard label="API Errors" value={stats.api_errors} />
+            </div>
+
+            {/* GCS Status */}
+            <div className="glass-panel">
+              <h3 className="section-title">Storage</h3>
+              <div className="kv-grid">
+                <span className="kv-key">Bucket</span>
+                <span className="kv-val mono">{gcs.bucket || 'Not configured'}</span>
+                <span className="kv-key">Status</span>
+                <span className="kv-val">
+                  {gcs.configured ? (
+                    <span className="text-success">● Configured</span>
+                  ) : (
+                    <span className="text-warn">● Not configured</span>
+                  )}
+                </span>
+                <span className="kv-key">Last Catalogue</span>
+                <span className="kv-val mono text-muted">{state?.lastCataloguePath || '—'}</span>
+                <span className="kv-key">Last Books</span>
+                <span className="kv-val mono text-muted">{state?.lastBooksPath || '—'}</span>
+              </div>
+            </div>
+
+            {/* Feed Status */}
+            <div className="glass-panel">
+              <h3 className="section-title">Data Feed</h3>
+              <p className="text-muted" style={{ marginBottom: '8px' }}>
+                The Lay Bet App can consume live data from this recorder's feed API.
+              </p>
+              <div className="kv-grid">
+                <span className="kv-key">Feed URL</span>
+                <span className="kv-val mono">{window.location.origin}/api/feed/</span>
+                <span className="kv-key">Markets Available</span>
+                <span className="kv-val mono">{stats.markets_cached ?? 0}</span>
+                <span className="kv-key">Books Available</span>
+                <span className="kv-val mono">{stats.books_cached ?? 0}</span>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {tab === 'markets' && (
+          <div className="glass-panel">
+            <h3 className="section-title">
+              Markets ({state?.markets?.length || 0})
+            </h3>
+            <MarketTable markets={state?.markets} />
+          </div>
+        )}
+
+        {tab === 'settings' && (
+          <div className="glass-panel">
+            <h3 className="section-title">Configuration</h3>
+            <SettingsPanel
+              config={config}
+              onSave={handleSaveConfig}
+              onValidateSession={handleValidateSession}
+              onTestGCS={handleTestGCS}
+            />
+          </div>
+        )}
+
+        {tab === 'errors' && (
+          <div className="glass-panel">
+            <h3 className="section-title">
+              Error Log ({state?.errors?.length || 0})
+            </h3>
+            <ErrorLog errors={state?.errors} />
+          </div>
+        )}
+      </main>
     </div>
   )
 }

@@ -1,290 +1,266 @@
 """
-CHIMERA DataPulse — API Server
-================================
-FastAPI backend for Cloud Run (europe-west2).
-Frontend served from Cloudflare Pages.
-
-Endpoints:
-  /api/health          - Health check
-  /api/keepalive       - Cloud Run warmup
-  /api/login           - Betfair authentication (credentials or SSOID)
-  /api/logout          - Clear session
-  /api/config          - Get/update configuration
-  /api/state           - Full engine state for dashboard
-  /api/engine/start    - Start recording
-  /api/engine/stop     - Stop recording
-  /api/feed/markets    - Lay Bet App data feed (markets)
-  /api/feed/market-book - Lay Bet App data feed (market books)
+CHIMERA Live Data Recorder — FastAPI Server
+=============================================
+Exposes REST endpoints for:
+  • Configuration management (Betfair, GCS, recorder settings)
+  • Session validation and GCS connection testing
+  • Recorder lifecycle (start / stop / manual poll)
+  • Dashboard state (engine status, stats, market list)
+  • Data feed for the Lay Bet App (drop-in Betfair replacement)
+  • Health / keepalive for Cloud Run and Cloud Scheduler
 """
 
 import os
 import logging
-from pathlib import Path
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from typing import Optional
 
-from dotenv import load_dotenv
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel
-
-from data_recorder import DataRecorder
-
-# Load .env if present (local dev)
-_env_path = Path(__file__).resolve().parent.parent / ".env"
-if _env_path.exists():
-    load_dotenv(_env_path)
+from config import AppConfig
+from recorder import RecorderEngine
 
 # ── Logging ──
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+    format="%(asctime)s  %(name)-12s  %(levelname)-7s  %(message)s",
     datefmt="%H:%M:%S",
 )
+logger = logging.getLogger("main")
 
-app = FastAPI(title="CHIMERA DataPulse", version="1.0.0")
+# ── Globals ──
+config: AppConfig = None
+engine: RecorderEngine = None
 
-# ── CORS: Allow Cloudflare Pages frontend + local dev ──
-# Set FRONTEND_URL to your exact Cloudflare Pages domain, or use "*" to allow all
-FRONTEND_URL = os.environ.get("FRONTEND_URL", "https://datapulse.thync.online")
-EXTRA_ORIGINS = os.environ.get("EXTRA_CORS_ORIGINS", "")  # comma-separated
 
+# ── Lifespan ──
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global config, engine
+    config = AppConfig.load()
+    engine = RecorderEngine(config)
+    logger.info("CHIMERA Live Recorder initialised")
+    yield
+    if engine and engine.running:
+        engine.stop()
+    logger.info("CHIMERA Live Recorder shutdown")
+
+
+# ── App ──
+app = FastAPI(
+    title="CHIMERA Live Data Recorder",
+    version="1.0.0",
+    lifespan=lifespan,
+)
+
+# ── CORS ──
+frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
 cors_origins = [
-    FRONTEND_URL,
-    "https://layengine.thync.online",
+    frontend_url,
     "http://localhost:5173",
-    "http://localhost:5174",
     "http://localhost:3000",
-    "http://127.0.0.1:5173",
 ]
-
-# Add any extra origins from env (e.g. Cloudflare Pages preview URLs)
-if EXTRA_ORIGINS:
-    cors_origins.extend([o.strip() for o in EXTRA_ORIGINS.split(",") if o.strip()])
-
+# Support comma-separated FRONTEND_URL for multiple origins
+if "," in frontend_url:
+    cors_origins = [u.strip() for u in frontend_url.split(",")] + [
+        "http://localhost:5173",
+        "http://localhost:3000",
+    ]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
-    allow_origin_regex=r"https://.*\.pages\.dev",  # All Cloudflare Pages preview URLs
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ── Engine singleton ──
-engine = DataRecorder()
 
-# Pre-configure from environment variables if available
-engine.configure(
-    app_key=os.environ.get("BETFAIR_APP_KEY", ""),
-    gcs_project=os.environ.get("GCS_PROJECT", ""),
-    gcs_bucket=os.environ.get("GCS_BUCKET", ""),
-    gcs_credentials=os.environ.get("GCS_CREDENTIALS", ""),
-    poll_interval=int(os.environ.get("POLL_INTERVAL", "60")),
-)
+# ═══════════════════════════════════════════
+#  REQUEST / RESPONSE MODELS
+# ═══════════════════════════════════════════
+
+class ConfigUpdate(BaseModel):
+    betfair_app_key: Optional[str] = None
+    betfair_ssoid: Optional[str] = None
+    gcs_project_id: Optional[str] = None
+    gcs_bucket_name: Optional[str] = None
+    gcs_base_path: Optional[str] = None
+    poll_interval_seconds: Optional[int] = None
+    countries: Optional[list[str]] = None
+    market_types: Optional[list[str]] = None
+    price_projection: Optional[list[str]] = None
+    catalogue_projections: Optional[list[str]] = None
 
 
-# ── Request models ──
-class LoginCredentialsRequest(BaseModel):
-    username: str
-    password: str
-
-
-class LoginSSOIDRequest(BaseModel):
+class SessionValidation(BaseModel):
     ssoid: str
-
-
-class ConfigRequest(BaseModel):
     app_key: Optional[str] = None
-    gcs_project: Optional[str] = None
-    gcs_bucket: Optional[str] = None
-    gcs_credentials: Optional[str] = None
-    poll_interval: Optional[int] = None
 
 
-class MarketBookRequest(BaseModel):
+class FeedBooksRequest(BaseModel):
     market_ids: list[str]
 
 
-# ──────────────────────────────────────────────
+# ═══════════════════════════════════════════
 #  HEALTH & KEEPALIVE
-# ──────────────────────────────────────────────
+# ═══════════════════════════════════════════
 
 @app.get("/api/health")
-def health():
-    return {"status": "ok", "engine": engine.status, "service": "datapulse"}
+async def health():
+    return {
+        "status": "ok",
+        "recorder": engine.status if engine else "uninitialised",
+    }
 
 
 @app.get("/api/keepalive")
-def keepalive():
-    """Cloud Run warmup endpoint."""
-    return {
-        "status": "ok",
-        "engine": engine.status,
-        "authenticated": engine.is_authenticated,
-        "poll_cycle": engine.poll_cycle,
-        "active_markets": len(engine._active_market_ids),
-        "total_snapshots": engine.total_snapshots,
-    }
+async def keepalive():
+    """Cloud Scheduler hits this to keep the instance warm."""
+    result = {"warmed": True, "status": engine.status if engine else "uninitialised"}
+    if engine and engine.running and engine.client:
+        ka = engine.client.keepalive()
+        result["session_alive"] = ka
+    return result
 
 
-# ──────────────────────────────────────────────
-#  AUTHENTICATION
-# ──────────────────────────────────────────────
-
-@app.post("/api/login/credentials")
-def login_credentials(req: LoginCredentialsRequest):
-    """Authenticate with Betfair using username/password."""
-    success, error = engine.login_credentials(req.username, req.password)
-    if success:
-        return {"status": "ok", "balance": engine.balance}
-    return JSONResponse(
-        status_code=401,
-        content={"status": "error", "message": f"Login failed: {error}"},
-    )
-
-
-@app.post("/api/login/ssoid")
-def login_ssoid(req: LoginSSOIDRequest):
-    """Authenticate using a pre-existing SSOID."""
-    success, error = engine.login_ssoid(req.ssoid)
-    if success:
-        return {"status": "ok", "balance": engine.balance}
-    return JSONResponse(
-        status_code=401,
-        content={"status": "error", "message": f"SSOID validation failed: {error}"},
-    )
-
-
-@app.post("/api/logout")
-def logout():
-    """Clear credentials and stop engine."""
-    engine.logout()
-    return {"status": "ok"}
-
-
-# ──────────────────────────────────────────────
+# ═══════════════════════════════════════════
 #  CONFIGURATION
-# ──────────────────────────────────────────────
+# ═══════════════════════════════════════════
 
 @app.get("/api/config")
-def get_config():
-    """Get current configuration (sensitive values masked)."""
-    return {
-        "app_key": engine.app_key[:8] + "..." if engine.app_key else "",
-        "gcs_project": engine.gcs_project,
-        "gcs_bucket": engine.gcs_bucket,
-        "gcs_credentials": "***" if engine.gcs_credentials else "",
-        "poll_interval": engine.poll_interval,
-        "gcs_ready": engine.storage.is_ready if engine.storage else False,
-    }
+async def get_config():
+    return config.to_safe_dict()
 
 
 @app.post("/api/config")
-def update_config(req: ConfigRequest):
-    """Update configuration."""
-    engine.configure(
-        app_key=req.app_key or "",
-        gcs_project=req.gcs_project or "",
-        gcs_bucket=req.gcs_bucket or "",
-        gcs_credentials=req.gcs_credentials or "",
-        poll_interval=req.poll_interval or engine.poll_interval,
-    )
-    return {"status": "ok", "config": get_config()}
+async def update_config(update: ConfigUpdate):
+    changes = update.model_dump(exclude_none=True)
+    if not changes:
+        raise HTTPException(400, "No fields provided")
+
+    # Map flat fields back to nested config
+    if "betfair_app_key" in changes:
+        config.betfair.app_key = changes["betfair_app_key"]
+    if "betfair_ssoid" in changes:
+        config.betfair.ssoid = changes["betfair_ssoid"]
+    if "gcs_project_id" in changes:
+        config.gcs.project_id = changes["gcs_project_id"]
+    if "gcs_bucket_name" in changes:
+        config.gcs.bucket_name = changes["gcs_bucket_name"]
+    if "gcs_base_path" in changes:
+        config.gcs.base_path = changes["gcs_base_path"]
+    if "poll_interval_seconds" in changes:
+        config.recorder.poll_interval_seconds = changes["poll_interval_seconds"]
+    if "countries" in changes:
+        config.recorder.countries = changes["countries"]
+    if "market_types" in changes:
+        config.recorder.market_types = changes["market_types"]
+    if "price_projection" in changes:
+        config.recorder.price_projection = changes["price_projection"]
+    if "catalogue_projections" in changes:
+        config.recorder.catalogue_projections = changes["catalogue_projections"]
+
+    engine.update_config(config)
+    return {"success": True, "config": config.to_safe_dict()}
 
 
-@app.post("/api/config/test-gcs")
-def test_gcs():
-    """Test GCS connection with current configuration."""
-    success, error = engine.init_storage()
-    if success:
-        return {"status": "ok", "message": "GCS connection successful"}
-    return JSONResponse(
-        status_code=400,
-        content={"status": "error", "message": error},
-    )
+# ═══════════════════════════════════════════
+#  SESSION & CONNECTION TESTING
+# ═══════════════════════════════════════════
+
+@app.post("/api/validate-session")
+async def validate_session(body: SessionValidation):
+    """Test a Betfair SSOID before saving it."""
+    from betfair_client import BetfairClient
+
+    app_key = body.app_key or config.betfair.app_key
+    if not app_key:
+        raise HTTPException(400, "app_key required")
+
+    test_client = BetfairClient(app_key=app_key, ssoid=body.ssoid)
+    result = test_client.validate_session()
+    return result
 
 
-# ──────────────────────────────────────────────
-#  ENGINE CONTROL
-# ──────────────────────────────────────────────
+@app.post("/api/test-gcs")
+async def test_gcs():
+    """Test the GCS connection with current config."""
+    result = engine.writer.test_connection()
+    return result
+
+
+# ═══════════════════════════════════════════
+#  RECORDER LIFECYCLE
+# ═══════════════════════════════════════════
+
+@app.post("/api/recorder/start")
+async def start_recorder():
+    result = engine.start()
+    if not result["success"]:
+        raise HTTPException(400, result["message"])
+    return result
+
+
+@app.post("/api/recorder/stop")
+async def stop_recorder():
+    return engine.stop()
+
+
+@app.post("/api/recorder/poll")
+async def manual_poll():
+    """Execute a single poll cycle (for testing)."""
+    result = engine.run_single_poll()
+    if not result["success"]:
+        raise HTTPException(400, result["message"])
+    return result
+
+
+# ═══════════════════════════════════════════
+#  DASHBOARD STATE
+# ═══════════════════════════════════════════
 
 @app.get("/api/state")
-def get_state():
-    """Full engine state for the dashboard."""
+async def get_state():
     return engine.get_state()
 
 
-@app.post("/api/engine/start")
-def start_engine():
-    """Start the recording engine."""
-    if not engine.is_authenticated:
-        return JSONResponse(
-            status_code=401,
-            content={"status": "error", "message": "Not authenticated"},
-        )
-    success, error = engine.start()
-    if success:
-        return {"status": "ok", "engine": engine.status}
-    return JSONResponse(
-        status_code=400,
-        content={"status": "error", "message": error},
-    )
-
-
-@app.post("/api/engine/stop")
-def stop_engine():
-    """Stop the recording engine."""
-    engine.stop()
-    return {"status": "ok", "engine": engine.status}
-
-
-# ──────────────────────────────────────────────
+# ═══════════════════════════════════════════
 #  DATA FEED (for Lay Bet App)
-# ──────────────────────────────────────────────
+# ═══════════════════════════════════════════
 
 @app.get("/api/feed/markets")
-def feed_markets():
-    """
-    Return today's UK/IE WIN markets for the Lay Bet App.
-    Format matches BetfairClient.get_todays_win_markets() exactly.
-    """
-    if not engine.is_authenticated:
-        return JSONResponse(
-            status_code=401,
-            content={"status": "error", "message": "Not authenticated"},
-        )
-    markets = engine.get_feed_markets()
-    return {"status": "ok", "markets": markets}
+async def feed_markets():
+    """Return cached market catalogue — drop-in for Betfair listMarketCatalogue."""
+    return engine.get_feed_markets()
 
 
-@app.post("/api/feed/market-book")
-def feed_market_book(req: MarketBookRequest):
-    """
-    Return latest market book data for the Lay Bet App.
-    Format matches Betfair's listMarketBook response exactly.
-    """
-    if not engine.is_authenticated:
-        return JSONResponse(
-            status_code=401,
-            content={"status": "error", "message": "Not authenticated"},
-        )
-    books = engine.get_feed_market_books_batch(req.market_ids)
-    return {"status": "ok", "books": books}
+@app.get("/api/feed/book/{market_id}")
+async def feed_book(market_id: str):
+    """Return cached market book — drop-in for Betfair listMarketBook."""
+    book = engine.get_feed_book(market_id)
+    if book is None:
+        raise HTTPException(404, f"No book data for market {market_id}")
+    return book
 
 
-@app.get("/api/feed/market-book/{market_id}")
-def feed_single_market_book(market_id: str):
-    """Return latest market book for a single market."""
-    if not engine.is_authenticated:
-        return JSONResponse(
-            status_code=401,
-            content={"status": "error", "message": "Not authenticated"},
-        )
-    book = engine.get_feed_market_book(market_id)
-    if book:
-        return {"status": "ok", "book": book}
-    return JSONResponse(
-        status_code=404,
-        content={"status": "error", "message": f"Market {market_id} not found"},
+@app.post("/api/feed/books")
+async def feed_books(body: FeedBooksRequest):
+    """Return cached books for multiple markets."""
+    return engine.get_feed_books(body.market_ids)
+
+
+# ═══════════════════════════════════════════
+#  RUN
+# ═══════════════════════════════════════════
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", 8080)),
+        reload=True,
     )
