@@ -252,6 +252,52 @@ async def feed_books(body: FeedBooksRequest):
 
 
 # ═══════════════════════════════════════════
+#  DEBUG (temporary — remove once working)
+# ═══════════════════════════════════════════
+
+@app.get("/api/debug/catalogue")
+async def debug_catalogue():
+    """Make a raw listMarketCatalogue call and return the full response."""
+    import requests as req
+    from datetime import datetime, timezone
+    from betfair_client import BETTING_API_BASE
+
+    if not engine.client.is_authenticated:
+        return {"error": "Not authenticated"}
+
+    now = datetime.now(timezone.utc)
+    params = {
+        "filter": {
+            "eventTypeIds": ["7"],
+            "marketCountries": config.recorder.countries,
+            "marketStartTime": {
+                "from": now.replace(hour=0, minute=0, second=0).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "to": now.replace(hour=23, minute=59, second=59).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            },
+        },
+        "maxResults": 1000,
+        "marketProjection": ["EVENT", "MARKET_START_TIME", "RUNNER_DESCRIPTION"],
+        "sort": "FIRST_TO_START",
+    }
+
+    url = f"{BETTING_API_BASE}/listMarketCatalogue/"
+    resp = req.post(
+        url,
+        json=params,
+        headers=engine.client._headers(),
+        timeout=30,
+    )
+
+    return {
+        "status_code": resp.status_code,
+        "url": url,
+        "params": params,
+        "response_length": len(resp.text),
+        "response_preview": resp.text[:2000],
+    }
+
+
+# ═══════════════════════════════════════════
 #  RUN
 # ═══════════════════════════════════════════
 

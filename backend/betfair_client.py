@@ -20,7 +20,7 @@ logger = logging.getLogger("betfair")
 
 # ── Betfair API endpoints ──
 KEEPALIVE_URL = "https://identitysso.betfair.com/api/keepAlive"
-BETTING_API_URL = "https://api.betfair.com/exchange/betting/json-rpc/v1"
+BETTING_API_BASE = "https://api.betfair.com/exchange/betting/rest/v1.0"
 
 # ── Horse Racing event type ──
 EVENT_TYPE_HORSE_RACING = "7"
@@ -133,63 +133,48 @@ class BetfairClient:
         return self._session_valid
 
     def _api_call(self, method: str, params: dict) -> Optional[list | dict]:
-        """Make a JSON-RPC call to the Betfair Betting API."""
+        """Make a REST API call to the Betfair Betting API."""
         if not self.is_authenticated:
             logger.error("Cannot make API call: not authenticated")
             return None
 
-        payload = {
-            "jsonrpc": "2.0",
-            "method": f"SportsAPING/v1.0/{method}",
-            "params": params,
-            "id": 1,
-        }
+        url = f"{BETTING_API_BASE}/{method}/"
 
         try:
             resp = requests.post(
-                BETTING_API_URL,
-                json=[payload],
+                url,
+                json=params,
                 headers=self._headers(),
                 timeout=30,
             )
             resp.raise_for_status()
-            results = resp.json()
+            data = resp.json()
 
-            logger.debug(
+            logger.info(
                 f"API {method}: HTTP {resp.status_code}, "
-                f"response length={len(resp.text)}"
+                f"response type={type(data).__name__}, "
+                f"length={len(data) if isinstance(data, (list, dict)) else 'N/A'}"
             )
 
-            if results and len(results) > 0:
-                result = results[0]
-                if "error" in result:
-                    error = result["error"]
-                    logger.error(f"API error on {method}: {error}")
-                    # Check for auth errors
-                    if isinstance(error, dict):
-                        err_code = error.get("data", {}).get("APINGException", {}).get(
-                            "errorCode", ""
-                        )
-                        if err_code in ("INVALID_SESSION_INFORMATION", "NO_SESSION"):
-                            self._session_valid = False
-                    return None
-                data = result.get("result")
-                if data is None:
-                    logger.warning(
-                        f"API {method}: result key missing. "
-                        f"Keys in response: {list(result.keys())}"
-                    )
-                elif isinstance(data, list) and len(data) == 0:
-                    logger.warning(
-                        f"API {method}: returned empty list (0 results). "
-                        f"Params: {json.dumps(params, default=str)[:500]}"
-                    )
-                return data
-            logger.warning(
-                f"API {method}: empty or invalid response body. "
-                f"Raw: {resp.text[:300]}"
-            )
-            return None
+            # Check for API-level errors (fault response)
+            if isinstance(data, dict) and "faultcode" in data:
+                logger.error(
+                    f"API fault on {method}: {data.get('faultstring', data)}"
+                )
+                detail = data.get("detail", {})
+                err_code = detail.get("APINGException", {}).get("errorCode", "")
+                if err_code in ("INVALID_SESSION_INFORMATION", "NO_SESSION"):
+                    self._session_valid = False
+                return None
+
+            if isinstance(data, list) and len(data) == 0:
+                logger.warning(
+                    f"API {method}: returned empty list (0 results). "
+                    f"Params: {json.dumps(params, default=str)[:500]}"
+                )
+
+            return data
+
         except requests.exceptions.Timeout:
             logger.error(f"API call {method} timed out")
             return None
