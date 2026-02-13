@@ -262,6 +262,35 @@ function MarketTable({ markets }) {
 }
 
 // ═══════════════════════════════════════════
+//  ACTIVITY LOG
+// ═══════════════════════════════════════════
+
+const LOG_LEVEL_COLORS = {
+  info: '#00D4FF',
+  warn: '#f59e0b',
+  error: '#ef4444',
+}
+
+function ActivityLog({ log }) {
+  if (!log || log.length === 0) {
+    return <div className="empty-state">No activity yet. Start the recorder or run a manual poll.</div>
+  }
+  return (
+    <div className="activity-log">
+      {log.slice().reverse().map((entry, i) => (
+        <div key={i} className={`log-entry log-${entry.level || 'info'}`}>
+          <span className="mono log-time">{new Date(entry.timestamp).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
+          <span className="log-level" style={{ color: LOG_LEVEL_COLORS[entry.level] || '#00D4FF' }}>
+            {(entry.level || 'info').toUpperCase()}
+          </span>
+          <span className="log-msg">{entry.message}</span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+// ═══════════════════════════════════════════
 //  ERROR LOG
 // ═══════════════════════════════════════════
 
@@ -401,7 +430,7 @@ export default function App() {
 
       {/* ── TABS ── */}
       <nav className="tab-bar">
-        {['dashboard', 'markets', 'settings', 'errors'].map((t) => (
+        {['dashboard', 'markets', 'log', 'settings', 'errors'].map((t) => (
           <button key={t} className={`tab ${tab === t ? 'tab-active' : ''}`} onClick={() => setTab(t)}>
             {t.charAt(0).toUpperCase() + t.slice(1)}
           </button>
@@ -487,6 +516,15 @@ export default function App() {
               Markets ({state?.markets?.length || 0})
             </h3>
             <MarketTable markets={state?.markets} />
+          </div>
+        )}
+
+        {tab === 'log' && (
+          <div className="glass-panel">
+            <h3 className="section-title">
+              Activity Log ({state?.log?.length || 0})
+            </h3>
+            <ActivityLog log={state?.log} />
           </div>
         )}
 

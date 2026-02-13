@@ -64,6 +64,7 @@ class RecorderEngine:
         self.last_catalogue_path: Optional[str] = None
         self.last_books_path: Optional[str] = None
         self.errors: list[dict] = []
+        self.activity_log: list[dict] = []  # Recent activity for dashboard
 
         # ── In-memory data cache (for feed API and dashboard) ──
         self._catalogue_cache: list[dict] = []  # Latest catalogue data
@@ -100,6 +101,7 @@ class RecorderEngine:
             base_path=config.gcs.base_path,
         )
         config.save()
+        self._log("Configuration updated")
         logger.info("Configuration updated")
 
     # ──────────────────────────────────────────────
@@ -115,17 +117,21 @@ class RecorderEngine:
             return {"success": False, "message": "Already running."}
 
         # Validate session before starting
+        self._log("Validating Betfair session...")
         validation = self.client.validate_session()
         if not validation["valid"]:
+            self._log(f"Session validation failed: {validation['message']}", level="error")
             return {
                 "success": False,
                 "message": f"Session validation failed: {validation['message']}",
             }
+        self._log("Session valid — starting recording loop")
 
         self.running = True
         self.status = "STARTING"
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
+        self._log("Recorder started")
         logger.info("Recorder started")
         return {"success": True, "message": "Recorder started."}
 
@@ -134,6 +140,7 @@ class RecorderEngine:
         self.running = False
         self.status = "STOPPED"
         self._save_state()
+        self._log("Recorder stopped")
         logger.info("Recorder stopped")
         return {"success": True, "message": "Recorder stopped."}
 
@@ -188,11 +195,13 @@ class RecorderEngine:
         self.poll_count += 1
 
         # ── Ensure session is alive ──
+        self._log(f"Poll #{self.poll_count}: checking Betfair session...")
         if not self.client.ensure_session():
             self._add_error("Session expired — attempting keepalive failed")
             self.status = "AUTH_ERROR"
             return
 
+        self._log(f"Poll #{self.poll_count}: session OK, fetching catalogue...")
         self.status = "POLLING"
 
         # ── Step 1: Fetch market catalogue ──
@@ -203,6 +212,7 @@ class RecorderEngine:
         )
 
         if not catalogue:
+            self._log(f"Poll #{self.poll_count}: no markets found", level="warn")
             logger.info("No markets found in this poll cycle")
             self.status = "RUNNING"
             return
@@ -221,6 +231,8 @@ class RecorderEngine:
                     "runners": len(market.get("runners", [])),
                     "status": "OPEN",
                 }
+
+        self._log(f"Poll #{self.poll_count}: found {len(catalogue)} markets, fetching books...")
 
         # ── Step 2: Fetch market books (prices) ──
         market_ids = [m["marketId"] for m in catalogue]
@@ -243,6 +255,8 @@ class RecorderEngine:
                         "totalMatched", 0
                     )
 
+        self._log(f"Poll #{self.poll_count}: got {len(books)} books, writing to GCS...")
+
         # ── Step 3: Write to GCS ──
         self.status = "WRITING"
 
@@ -250,15 +264,19 @@ class RecorderEngine:
         if cat_path:
             self.last_catalogue_path = cat_path
             self.stats["total_gcs_writes"] += 1
+            self._log(f"GCS write: catalogue → {cat_path}")
         elif self.writer.is_configured:
             self.stats["gcs_errors"] += 1
+            self._log("GCS write failed: catalogue", level="error")
 
         book_path = self.writer.write_books(books, now)
         if book_path:
             self.last_books_path = book_path
             self.stats["total_gcs_writes"] += 1
+            self._log(f"GCS write: books → {book_path}")
         elif self.writer.is_configured:
             self.stats["gcs_errors"] += 1
+            self._log("GCS write failed: books", level="error")
 
         # ── Update stats ──
         self.stats["total_polls"] += 1
@@ -270,6 +288,7 @@ class RecorderEngine:
             self._save_state()
 
         self.status = "RUNNING"
+        self._log(f"Poll #{self.poll_count} complete: {len(catalogue)} markets, {len(books)} books")
         logger.info(
             f"Poll #{self.poll_count}: {len(catalogue)} markets, "
             f"{len(books)} books recorded"
@@ -356,6 +375,7 @@ class RecorderEngine:
             "lastBooksPath": self.last_books_path,
             "markets": markets_summary,
             "errors": self.errors[-20:],
+            "log": self.activity_log[-50:],
             "config": self.config.to_safe_dict(),
         }
 
@@ -417,8 +437,19 @@ class RecorderEngine:
         except Exception as e:
             logger.warning(f"Failed to load state: {e}")
 
+    def _log(self, msg: str, level: str = "info"):
+        """Add an entry to the activity log visible on the dashboard."""
+        self.activity_log.append({
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "level": level,
+            "message": msg,
+        })
+        if len(self.activity_log) > 500:
+            self.activity_log = self.activity_log[-250:]
+
     def _add_error(self, msg: str):
         """Record an error."""
+        self._log(msg, level="error")
         self.errors.append(
             {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
