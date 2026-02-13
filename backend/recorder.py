@@ -215,10 +215,20 @@ class RecorderEngine:
             projections=self.config.recorder.catalogue_projections,
         )
 
-        if not catalogue:
+        if catalogue is None:
             self._log(
-                f"Poll #{self.poll_count}: no markets found — "
-                f"check countries/market_types filter or Betfair API errors in logs",
+                f"Poll #{self.poll_count}: catalogue API call FAILED — "
+                f"check Cloud Run logs for error details",
+                level="error",
+            )
+            self.stats["api_errors"] += 1
+            self.status = "RUNNING"
+            return
+
+        if len(catalogue) == 0:
+            self._log(
+                f"Poll #{self.poll_count}: Betfair returned 0 markets "
+                f"(API OK but no matches for current filter)",
                 level="warn",
             )
             logger.info("No markets found in this poll cycle")

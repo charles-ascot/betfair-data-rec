@@ -260,38 +260,44 @@ async def debug_catalogue():
     """Make a raw listMarketCatalogue call and return the full response."""
     import requests as req
     from datetime import datetime, timezone
-    from betfair_client import BETTING_API_BASE
+    from betfair_client import BETTING_API_URL
 
     if not engine.client.is_authenticated:
         return {"error": "Not authenticated"}
 
     now = datetime.now(timezone.utc)
-    params = {
-        "filter": {
-            "eventTypeIds": ["7"],
-            "marketCountries": config.recorder.countries,
-            "marketStartTime": {
-                "from": now.replace(hour=0, minute=0, second=0).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "to": now.replace(hour=23, minute=59, second=59).strftime("%Y-%m-%dT%H:%M:%SZ"),
+
+    # Match the exact format from the working Lay Engine reference
+    payload = {
+        "jsonrpc": "2.0",
+        "method": "SportsAPING/v1.0/listMarketCatalogue",
+        "params": {
+            "filter": {
+                "eventTypeIds": ["7"],
+                "marketCountries": config.recorder.countries,
+                "marketStartTime": {
+                    "from": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "to": now.replace(hour=23, minute=59, second=59).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                },
             },
+            "maxResults": "200",
+            "marketProjection": ["EVENT", "MARKET_START_TIME", "RUNNER_DESCRIPTION"],
+            "sort": "FIRST_TO_START",
         },
-        "maxResults": 1000,
-        "marketProjection": ["EVENT", "MARKET_START_TIME", "RUNNER_DESCRIPTION"],
-        "sort": "FIRST_TO_START",
+        "id": 1,
     }
 
-    url = f"{BETTING_API_BASE}/listMarketCatalogue/"
     resp = req.post(
-        url,
-        json=params,
+        BETTING_API_URL,
+        json=[payload],
         headers=engine.client._headers(),
         timeout=30,
     )
 
     return {
         "status_code": resp.status_code,
-        "url": url,
-        "params": params,
+        "url": BETTING_API_URL,
+        "payload": payload,
         "response_length": len(resp.text),
         "response_preview": resp.text[:2000],
     }

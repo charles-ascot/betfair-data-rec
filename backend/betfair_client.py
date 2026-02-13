@@ -20,7 +20,7 @@ logger = logging.getLogger("betfair")
 
 # ── Betfair API endpoints ──
 KEEPALIVE_URL = "https://identitysso.betfair.com/api/keepAlive"
-BETTING_API_BASE = "https://api.betfair.com/exchange/betting/rest/v1.0"
+BETTING_API_URL = "https://api.betfair.com/exchange/betting/json-rpc/v1"
 
 # ── Horse Racing event type ──
 EVENT_TYPE_HORSE_RACING = "7"
@@ -133,47 +133,59 @@ class BetfairClient:
         return self._session_valid
 
     def _api_call(self, method: str, params: dict) -> Optional[list | dict]:
-        """Make a REST API call to the Betfair Betting API."""
+        """
+        Make a JSON-RPC call to the Betfair Betting API.
+        Matches the proven format from the working Lay Engine client.
+        """
         if not self.is_authenticated:
             logger.error("Cannot make API call: not authenticated")
             return None
 
-        url = f"{BETTING_API_BASE}/{method}/"
+        payload = {
+            "jsonrpc": "2.0",
+            "method": f"SportsAPING/v1.0/{method}",
+            "params": params,
+            "id": 1,
+        }
 
         try:
             resp = requests.post(
-                url,
-                json=params,
+                BETTING_API_URL,
+                json=[payload],
                 headers=self._headers(),
                 timeout=30,
             )
             resp.raise_for_status()
-            data = resp.json()
+            results = resp.json()
 
-            logger.info(
-                f"API {method}: HTTP {resp.status_code}, "
-                f"response type={type(data).__name__}, "
-                f"length={len(data) if isinstance(data, (list, dict)) else 'N/A'}"
+            if results and len(results) > 0:
+                result = results[0]
+                if "error" in result:
+                    error = result["error"]
+                    logger.error(f"API error on {method}: {error}")
+                    # Check for auth errors
+                    if isinstance(error, dict):
+                        err_code = error.get("data", {}).get("APINGException", {}).get(
+                            "errorCode", ""
+                        )
+                        if err_code in ("INVALID_SESSION_INFORMATION", "NO_SESSION"):
+                            self._session_valid = False
+                    return None
+                data = result.get("result")
+                if data is None:
+                    logger.warning(
+                        f"API {method}: result key missing. "
+                        f"Response keys: {list(result.keys())}"
+                    )
+                elif isinstance(data, list):
+                    logger.info(f"API {method}: returned {len(data)} results")
+                return data
+
+            logger.warning(
+                f"API {method}: empty response body. "
+                f"Raw (first 300 chars): {resp.text[:300]}"
             )
-
-            # Check for API-level errors (fault response)
-            if isinstance(data, dict) and "faultcode" in data:
-                logger.error(
-                    f"API fault on {method}: {data.get('faultstring', data)}"
-                )
-                detail = data.get("detail", {})
-                err_code = detail.get("APINGException", {}).get("errorCode", "")
-                if err_code in ("INVALID_SESSION_INFORMATION", "NO_SESSION"):
-                    self._session_valid = False
-                return None
-
-            if isinstance(data, list) and len(data) == 0:
-                logger.warning(
-                    f"API {method}: returned empty list (0 results). "
-                    f"Params: {json.dumps(params, default=str)[:500]}"
-                )
-
-            return data
+            return None
 
         except requests.exceptions.Timeout:
             logger.error(f"API call {method} timed out")
@@ -196,14 +208,14 @@ class BetfairClient:
         projections: list[str],
         from_time: Optional[datetime] = None,
         to_time: Optional[datetime] = None,
-    ) -> list[dict]:
+    ) -> Optional[list[dict]]:
         """
         Fetch market catalogue for UK/IE horse racing.
-        Returns raw Betfair response data (list of market catalogue objects).
+        Returns list of markets, or None on API failure.
         """
         now = datetime.now(timezone.utc)
         if from_time is None:
-            from_time = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            from_time = now
         if to_time is None:
             to_time = now.replace(hour=23, minute=59, second=59, microsecond=0)
 
@@ -222,14 +234,14 @@ class BetfairClient:
 
         params = {
             "filter": market_filter,
-            "maxResults": 1000,
+            "maxResults": "1000",
             "marketProjection": projections,
             "sort": "FIRST_TO_START",
         }
 
         result = self._api_call("listMarketCatalogue", params)
         if result is None:
-            return []
+            return None
 
         logger.info(f"Catalogue: {len(result)} markets found")
         return result
@@ -294,7 +306,7 @@ class BetfairClient:
         return result or []
 
     # ──────────────────────────────────────────────
-    #  RACE STATUS (supplementary)
+    #  SESSION VALIDATION
     # ──────────────────────────────────────────────
 
     def validate_session(self) -> dict:
