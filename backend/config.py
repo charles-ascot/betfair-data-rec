@@ -41,7 +41,7 @@ class RecorderConfig:
     poll_interval_seconds: int = 60
     countries: list = field(default_factory=lambda: ["GB", "IE"])
     event_type_id: str = "7"  # Horse Racing
-    market_types: list = field(default_factory=lambda: [])  # Empty = ALL types
+    market_types: list = field(default_factory=lambda: ["WIN"])  # WIN only
     price_projection: list = field(
         default_factory=lambda: [
             "EX_BEST_OFFERS",
@@ -55,12 +55,8 @@ class RecorderConfig:
     catalogue_projections: list = field(
         default_factory=lambda: [
             "EVENT",
-            "EVENT_TYPE",
-            "COMPETITION",
             "MARKET_START_TIME",
-            "MARKET_DESCRIPTION",
             "RUNNER_DESCRIPTION",
-            "RUNNER_METADATA",
         ]
     )
 
