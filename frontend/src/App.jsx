@@ -390,6 +390,7 @@ export default function App() {
   // ── Derived ──
   const status = state?.status || 'LOADING'
   const isRunning = status === 'RUNNING' || status === 'POLLING' || status === 'WRITING'
+  const isAuthenticated = state?.authenticated || false
   const stats = state?.stats || {}
   const gcs = state?.gcs || {}
 
@@ -413,6 +414,10 @@ export default function App() {
             <span className="title-accent">CHIMERA</span> Live Recorder
           </h1>
           <StatusBadge status={status} />
+          <span className={`api-lamp ${isAuthenticated ? 'api-live' : 'api-disconnected'}`}>
+            <span className="api-lamp-dot" />
+            {isAuthenticated ? 'Betfair Live' : 'Disconnected'}
+          </span>
         </div>
         <div className="header-right">
           <span className="header-date mono">{state?.date || '—'}</span>
