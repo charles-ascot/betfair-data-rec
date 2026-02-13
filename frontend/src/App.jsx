@@ -73,9 +73,11 @@ function SettingsPanel({ config, onSave, onValidateSession, onTestGCS }) {
   const [validating, setValidating] = useState(false)
   const [testingGCS, setTestingGCS] = useState(false)
   const [message, setMessage] = useState(null)
+  const initializedRef = useRef(false)
 
   useEffect(() => {
-    if (config) {
+    if (config && !initializedRef.current) {
+      initializedRef.current = true
       setForm({
         betfair_app_key: config.betfair?.app_key || '',
         betfair_ssoid: '',
@@ -105,6 +107,7 @@ function SettingsPanel({ config, onSave, onValidateSession, onTestGCS }) {
       payload.countries = form.countries.split(',').map((c) => c.trim()).filter(Boolean)
       payload.price_projection = form.price_projection.split(',').map((p) => p.trim()).filter(Boolean)
       await onSave(payload)
+      initializedRef.current = false  // Allow form to refresh from saved config
       setMessage({ type: 'success', text: 'Configuration saved' })
     } catch (e) {
       setMessage({ type: 'error', text: e.message })
