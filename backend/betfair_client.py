@@ -234,7 +234,7 @@ class BetfairClient:
 
         params = {
             "filter": market_filter,
-            "maxResults": "1000",
+            "maxResults": "200",
             "marketProjection": projections,
             "sort": "FIRST_TO_START",
         }
