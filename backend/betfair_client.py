@@ -9,6 +9,7 @@ from their Betfair session and provides via the settings UI.
 Session keepalive is handled automatically.
 """
 
+import json
 import time
 import logging
 import requests
@@ -154,6 +155,11 @@ class BetfairClient:
             resp.raise_for_status()
             results = resp.json()
 
+            logger.debug(
+                f"API {method}: HTTP {resp.status_code}, "
+                f"response length={len(resp.text)}"
+            )
+
             if results and len(results) > 0:
                 result = results[0]
                 if "error" in result:
@@ -167,7 +173,22 @@ class BetfairClient:
                         if err_code in ("INVALID_SESSION_INFORMATION", "NO_SESSION"):
                             self._session_valid = False
                     return None
-                return result.get("result")
+                data = result.get("result")
+                if data is None:
+                    logger.warning(
+                        f"API {method}: result key missing. "
+                        f"Keys in response: {list(result.keys())}"
+                    )
+                elif isinstance(data, list) and len(data) == 0:
+                    logger.warning(
+                        f"API {method}: returned empty list (0 results). "
+                        f"Params: {json.dumps(params, default=str)[:500]}"
+                    )
+                return data
+            logger.warning(
+                f"API {method}: empty or invalid response body. "
+                f"Raw: {resp.text[:300]}"
+            )
             return None
         except requests.exceptions.Timeout:
             logger.error(f"API call {method} timed out")
@@ -216,7 +237,7 @@ class BetfairClient:
 
         params = {
             "filter": market_filter,
-            "maxResults": "1000",
+            "maxResults": 1000,
             "marketProjection": projections,
             "sort": "FIRST_TO_START",
         }

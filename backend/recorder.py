@@ -201,7 +201,11 @@ class RecorderEngine:
             self.status = "AUTH_ERROR"
             return
 
-        self._log(f"Poll #{self.poll_count}: session OK, fetching catalogue...")
+        self._log(
+            f"Poll #{self.poll_count}: session OK, fetching catalogue "
+            f"(countries={self.config.recorder.countries}, "
+            f"market_types={self.config.recorder.market_types or 'ALL'})"
+        )
         self.status = "POLLING"
 
         # ── Step 1: Fetch market catalogue ──
@@ -212,7 +216,11 @@ class RecorderEngine:
         )
 
         if not catalogue:
-            self._log(f"Poll #{self.poll_count}: no markets found", level="warn")
+            self._log(
+                f"Poll #{self.poll_count}: no markets found — "
+                f"check countries/market_types filter or Betfair API errors in logs",
+                level="warn",
+            )
             logger.info("No markets found in this poll cycle")
             self.status = "RUNNING"
             return
